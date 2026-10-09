@@ -12,6 +12,7 @@ import (
 
 type Engine struct {
 	client *torrent.Client
+	downloadDir string
 }
 
 func New(downloadDir string) (*Engine, error) {
@@ -33,6 +34,7 @@ func New(downloadDir string) (*Engine, error) {
 
 	return &Engine{
 		client: client,
+		downloadDir:  downloadDir,
 	}, nil
 }
 
@@ -65,4 +67,37 @@ func (e *Engine) AddTorrentFile (filePath string) (*torrent.Torrent, error) {
 	}
 
 	return t, nil
+}
+
+func (e *Engine) Torrents() []*torrent.Torrent {
+	return e.client.Torrents()
+}
+
+func (e *Engine) Find(hashStr string) (*torrent.Torrent, error) {
+	var ih metainfo.Hash
+
+	err := ih.FromHexString(hashStr)
+	if err != nil {
+		return nil, fmt.Errorf("hash invalida: %w", err)
+	}
+
+	t, ok := e.client.Torrent(ih)
+	if !ok {
+		return nil, fmt.Errorf("torrent not found: %s", hashStr)
+	}
+
+	return t, nil
+}
+
+func (e *Engine) Remove(hashStr string, deleteFiles bool) error {
+	t, err := e.Find(hashStr)
+	if err != nil {
+		return fmt.Errorf("torrent not found :%s", hashStr)
+	}
+
+	t.Drop()
+	if deleteFiles && t.Name() != "" {
+		os.RemoveAll(filepath.Join(e.downloadDir, t.Name()))
+	}
+	return nil
 }
