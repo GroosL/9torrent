@@ -9,6 +9,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/anacrolix/torrent"
 
 	"torrent-cli/pkg/engine"
 )
@@ -31,6 +32,17 @@ type CtlNode struct {
 type TorrentsDirNode struct {
   fs.Inode
   engine *engine.Engine
+}
+
+type TorrentNode struct {
+	fs.Inode
+	torrent *torrent.Torrent
+	engine *engine.Engine
+}
+
+type TorrentNameNode struct {
+	fs.Inode
+	torrent *torrent.Torrent
 }
 
 func (r *RootNode) OnAdd(ctx context.Context) {
@@ -103,6 +115,42 @@ func (c *CtlNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off 
 		}
 	}
 	return uint32(len(data)), 0
+}
+
+func (td *TorrentsDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries := []fuse.DirEntry{}
+	for _, t := range td.engine.Torrents() {
+		ih := t.InfoHash().HexString()
+		entries = append(entries, fuse.DirEntry{Name: ih, Mode: fuse.S_IFDIR,})
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func (td *TorrentsDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall. Errno) {
+	t, err := td.engine.Find(name)
+	if err != nil {
+		return nil, syscall.ENOENT
+	}
+	node := &TorrentNode{torrent: t, engine: td.engine}
+	return td.NewPersistentInode(ctx, node, fs.StableAttr{Mode: fuse.S_IFDIR}), 0
+}
+
+func (tn *TorrentNode) OnAdd(ctx context.Context) {
+	nameNode := &TorrentNameNode{torrent: tn.torrent}
+	tn.AddChild("name", tn.NewPersistentInode(ctx, nameNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
+}
+
+func (tn *TorrentNameNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func (tn *TorrentNameNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	name := tn.torrent.Name() + "\n"
+	data := []byte(name)
+	if off >= int64(len(data)) {
+		return fuse.ReadResultData(nil), 0
+	}
+	return fuse.ReadResultData(data[off:]), 0
 }
 
 func Mount(mountDir string, eng *engine.Engine) (*fuse.Server, error) {
