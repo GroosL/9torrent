@@ -83,15 +83,35 @@ func (s *StatusNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, of
 	    "Torrents stalled: %d\n"+
 	    "Torrents paused: %d\n"+
 	    "Torrents finished: %d\n"+
-	    "Total download speed: 0 B/s\n"+
-	    "Total upload speed: 0 B/s\n",
+	    "Total download speed: %s\n"+
+	    "Total upload speed: %s\n",
 	    downloading, seeding, stalled, paused, finished,
+	    formatSpeed(s.engine.DownloadRate()),
+	    formatSpeed(s.engine.UploadRate()),
 	)
 	data := []byte(output)
 	if off >= int64(len(data)) {
 	    return fuse.ReadResultData(nil), 0
 	}
 	return fuse.ReadResultData(data[off:]), 0
+}
+
+func formatSpeed(bytesPerSec int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bytesPerSec >= GB:
+		return fmt.Sprintf("%.2f GB/s", float64(bytesPerSec)/float64(GB))
+	case bytesPerSec >= MB:
+		return fmt.Sprintf("%.2f MB/s", float64(bytesPerSec)/float64(MB))
+	case bytesPerSec >= KB:
+		return fmt.Sprintf("%.2f KB/s", float64(bytesPerSec)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B/s", bytesPerSec)
+	}
 }
 
 func (c *CtlNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -103,15 +123,27 @@ func (c *CtlNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttr
 	return 0
 }
 
+func (c *CtlNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
 func (c *CtlNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	cmd := strings.TrimSpace(string(data))
 
 	if strings.HasPrefix(cmd, "add ") {
 		target := strings.TrimSpace(cmd[4:])
+		var t *torrent.Torrent
+		var err error
 		if strings.HasPrefix(target, "magnet:") {
-			c.engine.AddMagnet(target)
+			t, err = c.engine.AddMagnet(target)
 		} else {
-			c.engine.AddTorrentFile(target)
+			t, err = c.engine.AddTorrentFile(target)
+		}
+		if err == nil && t != nil {
+			go func() {
+				<-t.GotInfo()
+				t.DownloadAll()
+			}()
 		}
 	}
 	return uint32(len(data)), 0

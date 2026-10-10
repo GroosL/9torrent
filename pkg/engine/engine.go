@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
+	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
 type Engine struct {
-	client *torrent.Client
-	downloadDir string
+	client       *torrent.Client
+	downloadDir  string
+	downloadRate int64
+	uploadRate   int64
+	rateMu       sync.RWMutex
 }
 
 func New(downloadDir string) (*Engine, error) {
@@ -32,10 +36,57 @@ func New(downloadDir string) (*Engine, error) {
 		return nil, fmt.Errorf("initialize torrent client: %w", err)
 	}
 
-	return &Engine{
-		client: client,
-		downloadDir:  downloadDir,
-	}, nil
+	e := &Engine{
+		client:      client,
+		downloadDir: downloadDir,
+	}
+
+	go e.trackRates()
+	return e, nil
+}
+
+func (e *Engine) trackRates() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var lastRead, lastWrite int64
+	for range ticker.C {
+		if e.client == nil {
+			return
+		}
+		stats := e.client.ConnStats()
+		curRead := stats.BytesReadUsefulData.Int64()
+		curWrite := stats.BytesWrittenData.Int64()
+
+		dl := curRead - lastRead
+		ul := curWrite - lastWrite
+		if dl < 0 {
+			dl = 0
+		}
+		if ul < 0 {
+			ul = 0
+		}
+
+		lastRead = curRead
+		lastWrite = curWrite
+
+		e.rateMu.Lock()
+		e.downloadRate = dl
+		e.uploadRate = ul
+		e.rateMu.Unlock()
+	}
+}
+
+func (e *Engine) DownloadRate() int64 {
+	e.rateMu.RLock()
+	defer e.rateMu.RUnlock()
+	return e.downloadRate
+}
+
+func (e *Engine) UploadRate() int64 {
+	e.rateMu.RLock()
+	defer e.rateMu.RUnlock()
+	return e.uploadRate
 }
 
 func (e *Engine) Close() error {
