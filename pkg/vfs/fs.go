@@ -45,6 +45,29 @@ type TorrentNameNode struct {
 	torrent *torrent.Torrent
 }
 
+type TorrentStatusNode struct {
+	fs.Inode
+	torrent *torrent.Torrent
+}
+
+func formatBytes(b int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case b >= GB:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(GB))
+	case b >= MB:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(MB))
+	case b >= KB:
+		return fmt.Sprintf("%.2f KB", float64(b)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
 func (r *RootNode) OnAdd(ctx context.Context) {
 	status := &StatusNode{engine: r.engine}
 	r.AddChild("status", r.NewPersistentInode(ctx, status, fs.StableAttr{Mode: fuse.S_IFREG}), false)
@@ -170,6 +193,9 @@ func (td *TorrentsDirNode) Lookup(ctx context.Context, name string, out *fuse.En
 func (tn *TorrentNode) OnAdd(ctx context.Context) {
 	nameNode := &TorrentNameNode{torrent: tn.torrent}
 	tn.AddChild("name", tn.NewPersistentInode(ctx, nameNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
+	
+	statusNode := &TorrentStatusNode{torrent: tn.torrent}
+	tn.AddChild("status", tn.NewPersistentInode(ctx, statusNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
 }
 
 func (tn *TorrentNameNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -179,6 +205,60 @@ func (tn *TorrentNameNode) Open(ctx context.Context, flags uint32) (fs.FileHandl
 func (tn *TorrentNameNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	name := tn.torrent.Name() + "\n"
 	data := []byte(name)
+	if off >= int64(len(data)) {
+		return fuse.ReadResultData(nil), 0
+	}
+	return fuse.ReadResultData(data[off:]), 0
+}
+
+func (tn *TorrentStatusNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func (tn *TorrentStatusNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	t := tn.torrent
+
+	if t.Info() == nil || t.Length() == 0 {
+		data := []byte("Status: waiting metadata...\n")
+		if off >= int64(len(data)) {
+			return fuse.ReadResultData(nil), 0
+		}
+		return fuse.ReadResultData(data[off:]), 0
+	}
+
+	completed := t.BytesCompleted()
+	total := t.Length()
+	percent := float64(completed) / float64(total) * 100
+	stats := t.Stats()
+
+	var state string
+	if completed >= total {
+		state = "Completed"
+		if stats.ActivePeers > 0 {
+			state = "Seeding"
+		}
+	} else if stats.ActivePeers > 0 {
+		state = "Downloading"
+	} else {
+		state = "Stalled"
+	}
+
+	output := fmt.Sprintf(
+		"Name: %s\n"+
+			"State: %s\n"+
+			"Progress: %.2f%%\n"+
+			"Downloaded: %s / %s\n"+
+			"Active peers: %d (Total: %d)\n",
+		t.Name(),
+		state,
+		percent,
+		formatBytes(completed),
+		formatBytes(total),
+		stats.ActivePeers,
+		stats.TotalPeers,
+	)
+
+	data := []byte(output)
 	if off >= int64(len(data)) {
 		return fuse.ReadResultData(nil), 0
 	}
