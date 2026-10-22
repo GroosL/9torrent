@@ -50,6 +50,12 @@ type TorrentStatusNode struct {
 	torrent *torrent.Torrent
 }
 
+type TorrentCtlNode struct {
+	fs.Inode
+	torrent *torrent.Torrent
+	engine *engine.Engine
+}
+
 func formatBytes(b int64) string {
 	const (
 		KB = 1024
@@ -196,6 +202,9 @@ func (tn *TorrentNode) OnAdd(ctx context.Context) {
 	
 	statusNode := &TorrentStatusNode{torrent: tn.torrent}
 	tn.AddChild("status", tn.NewPersistentInode(ctx, statusNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
+
+	ctlNode := &TorrentCtlNode{torrent: tn.torrent, engine: tn.engine}
+	tn.AddChild("ctl", tn.NewPersistentInode(ctx,ctlNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
 }
 
 func (tn *TorrentNameNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -219,7 +228,7 @@ func (tn *TorrentStatusNode) Read(ctx context.Context, fh fs.FileHandle, dest []
 	t := tn.torrent
 
 	if t.Info() == nil || t.Length() == 0 {
-		data := []byte("Status: waiting metadata...\n")
+		data := []byte("waiting metadata...\n")
 		if off >= int64(len(data)) {
 			return fuse.ReadResultData(nil), 0
 		}
@@ -263,6 +272,71 @@ func (tn *TorrentStatusNode) Read(ctx context.Context, fh fs.FileHandle, dest []
 		return fuse.ReadResultData(nil), 0
 	}
 	return fuse.ReadResultData(data[off:]), 0
+}
+
+func (tn *TorrentCtlNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	return nil, fuse.FOPEN_DIRECT_IO, 0
+}
+
+func (tn *TorrentCtlNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFREG | 0200
+	return 0
+}
+
+func (tn *TorrentCtlNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return 0
+}
+
+func (tn *TorrentCtlNode) handlePause() syscall.Errno {
+	tn.torrent.DisallowDataDownload()
+	if tn.torrent.Info() != nil {
+		tn.torrent.CancelPieces(0, tn.torrent.NumPieces())
+	}
+	return 0
+}
+
+func (tn *TorrentCtlNode) handleResume() syscall.Errno {
+	tn.torrent.AllowDataDownload()
+	tn.torrent.DownloadAll()
+	return 0
+}
+
+func (tn *TorrentCtlNode) handleDelete() syscall.Errno {
+	ih := tn.torrent.InfoHash().HexString()
+	if err := tn.engine.Remove(ih, false); err != nil {
+		return syscall.EIO
+	}
+	return 0
+}
+
+func (tn *TorrentCtlNode) handlePurge() syscall.Errno {
+	ih := tn.torrent.InfoHash().HexString()
+	if err := tn.engine.Remove(ih, true); err != nil {
+		return syscall.EIO
+	}
+	return 0
+}
+
+func (tn *TorrentCtlNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	cmd := strings.TrimSpace(string(data))
+
+	handlers := map[string]func() syscall.Errno {
+		"pause": tn.handlePause,
+		"resume": tn.handleResume,
+		"delete": tn.handleDelete,
+		"purge": tn.handlePurge,
+	}
+
+	handler, exists := handlers[cmd]
+	if !exists {
+		return 0, syscall.EINVAL
+	}
+
+	if errno := handler(); errno != 0 {
+		return 0, errno
+	}
+
+	return uint32(len(data)), 0
 }
 
 func Mount(mountDir string, eng *engine.Engine) (*fuse.Server, error) {
