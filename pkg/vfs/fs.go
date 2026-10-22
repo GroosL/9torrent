@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/anacrolix/torrent"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/anacrolix/torrent"
 
 	"torrent-cli/pkg/engine"
 )
@@ -54,6 +55,16 @@ type TorrentCtlNode struct {
 	fs.Inode
 	torrent *torrent.Torrent
 	engine *engine.Engine
+}
+
+type TorrentFilesDirNode struct {
+	fs.Inode
+	torrent *torrent.Torrent
+}
+
+type TorrentFileNode struct {
+	fs.Inode
+	file *torrent.File
 }
 
 func formatBytes(b int64) string {
@@ -205,6 +216,9 @@ func (tn *TorrentNode) OnAdd(ctx context.Context) {
 
 	ctlNode := &TorrentCtlNode{torrent: tn.torrent, engine: tn.engine}
 	tn.AddChild("ctl", tn.NewPersistentInode(ctx,ctlNode, fs.StableAttr{Mode: fuse.S_IFREG}), false)
+
+	filesDirNode := &TorrentFilesDirNode{torrent: tn.torrent}
+	tn.AddChild("files", tn.NewPersistentInode(ctx, filesDirNode, fs.StableAttr{Mode: fuse.S_IFDIR}), false)
 }
 
 func (tn *TorrentNameNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -337,6 +351,37 @@ func (tn *TorrentCtlNode) Write(ctx context.Context, fh fs.FileHandle, data []by
 	}
 
 	return uint32(len(data)), 0
+}
+
+func (td *TorrentFilesDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	if td.torrent.Info() == nil {
+		return fs.NewListDirStream(nil), 0
+	}
+
+	files := td.torrent.Files()
+	entries := make([]fuse.DirEntry, len(files))
+	for i := range files {
+		entries[i] = fuse.DirEntry{
+			Name: strconv.Itoa(i),
+			Mode: fuse.S_IFDIR,
+		}
+	}
+	return fs.NewListDirStream(entries), 0
+}
+
+func (td *TorrentFilesDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if td.torrent.Info() == nil {
+		return nil, syscall.ENOENT
+	}
+
+	idx, err := strconv.Atoi(name)
+	files := td.torrent.Files()
+	if err != nil || idx < 0 || idx >= len(files) {
+		return nil, syscall.ENOENT
+	}
+
+	node := &TorrentFileNode{file: files[idx]}
+	return td.NewPersistentInode(ctx, node, fs.StableAttr{Mode: fuse.S_IFDIR}), 0
 }
 
 func Mount(mountDir string, eng *engine.Engine) (*fuse.Server, error) {
